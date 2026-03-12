@@ -1,0 +1,96 @@
+name: Manually Triggered Playwright Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment used by playwright.config.js (test or stage)"
+        required: true
+        default: "test"
+        type: choice
+        options:
+          - test
+          - stage
+      project:
+        description: "Playwright project (optional): setup, smoke, flow, tests"
+        required: false
+        default: ""
+        type: string
+      path:
+        description: "Test folder/file path (optional), e.g. tests/admin/services or tests/smoke/admin.smoke.js"
+        required: false
+        default: ""
+        type: string
+      grep:
+        description: "Run tests by name/title using --grep (optional)"
+        required: false
+        default: ""
+        type: string
+      workers:
+        description: "Number of workers"
+        required: true
+        default: "1"
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ENV: ${{ github.event.inputs.env }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Run Docker
+        run: docker compose up -d
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Build Playwright command
+        id: pw_cmd
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CMD="npx playwright test"
+
+          if [ -n "${{ github.event.inputs.path }}" ]; then
+            CMD="$CMD ${{ github.event.inputs.path }}"
+          fi
+
+          if [ -n "${{ github.event.inputs.project }}" ]; then
+            CMD="$CMD --project ${{ github.event.inputs.project }}"
+          fi
+
+          if [ -n "${{ github.event.inputs.grep }}" ]; then
+            CMD="$CMD --grep \"${{ github.event.inputs.grep }}\""
+          fi
+
+          CMD="$CMD --workers=${{ github.event.inputs.workers }}"
+
+          echo "command=$CMD" >> "$GITHUB_OUTPUT"
+          echo "Playwright command: $CMD"
+
+      - name: Run Playwright tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          eval "${{ steps.pw_cmd.outputs.command }}"
+
+      - name: Upload Playwright Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
