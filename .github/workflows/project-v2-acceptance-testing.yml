@@ -273,6 +273,10 @@ jobs:
             echo "Missing secret BYK_PAT"
             exit 1
           fi
+          if [ -z "${ORG:-}" ] || [ -z "${PROJECT_NUMBER:-}" ] || [ -z "${STATUS_FIELD_NAME:-}" ] || [ -z "${SUCCESS_STATUS:-}" ] || [ -z "${FAIL_STATUS:-}" ]; then
+            echo "Missing required repository variables: ORG, PROJECT_NUMBER, STATUS_FIELD_NAME, SUCCESS_STATUS, FAIL_STATUS"
+            exit 1
+          fi
 
           query_project=$(jq -n \
             --arg org "$ORG" \
@@ -291,10 +295,10 @@ jobs:
             -d "$query_project" \
             https://api.github.com/graphql)
 
-          project_id=$(echo "$project_resp" | jq -r '.data.organization.projectV2.id')
-          field_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name == $f) | .id')
-          done_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$SUCCESS_STATUS" '.data.organization.projectV2.fields.nodes[] | select(.name == $f) | .options[] | select(.name == $s) | .id')
-          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$FAIL_STATUS" '.data.organization.projectV2.fields.nodes[] | select(.name == $f) | .options[] | select(.name == $s) | .id')
+          project_id=$(echo "$project_resp" | jq -r '.data.organization.projectV2.id // empty')
+          field_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" '((.data.organization.projectV2.fields.nodes // []) | map(select(.name == $f)) | .[0].id) // empty')
+          done_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$SUCCESS_STATUS" '((((.data.organization.projectV2.fields.nodes // []) | map(select(.name == $f)) | .[0].options) // []) | map(select(.name == $s)) | .[0].id) // empty')
+          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$FAIL_STATUS" '((((.data.organization.projectV2.fields.nodes // []) | map(select(.name == $f)) | .[0].options) // []) | map(select(.name == $s)) | .[0].id) // empty')
 
           if [ -z "$project_id" ] || [ "$project_id" = "null" ] || [ -z "$field_id" ] || [ "$field_id" = "null" ] || [ -z "$done_option_id" ] || [ "$done_option_id" = "null" ] || [ -z "$rejected_option_id" ] || [ "$rejected_option_id" = "null" ]; then
             echo "Could not resolve project/field/option ids"
@@ -318,7 +322,7 @@ jobs:
             -d "$query_item" \
             https://api.github.com/graphql)
 
-          item_id=$(echo "$item_resp" | jq -r --arg pid "$project_id" '.data.repository.issue.projectItems.nodes[] | select(.project.id == $pid) | .id' | head -n1)
+          item_id=$(echo "$item_resp" | jq -r --arg pid "$project_id" '((.data.repository.issue.projectItems.nodes // []) | map(select(.project.id == $pid)) | .[0].id) // empty')
 
           if [ -z "$item_id" ] || [ "$item_id" = "null" ]; then
             echo "Issue #$ISSUE_NUMBER is not linked to project $project_id"
