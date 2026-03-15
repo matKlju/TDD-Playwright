@@ -361,7 +361,7 @@ jobs:
 
   set_status_done:
     needs: [tests_on_label, resolve_project_item]
-    if: needs.tests_on_label.result == 'success'
+    if: ${{ always() && needs.tests_on_label.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Update project status to Done
@@ -392,7 +392,7 @@ jobs:
 
   set_status_rejected:
     needs: [tests_on_label, resolve_project_item]
-    if: needs.tests_on_label.result == 'failure'
+    if: ${{ always() && needs.tests_on_label.result == 'failure' }}
     runs-on: ubuntu-latest
     steps:
       - name: Update project status to AT rejected
