@@ -35,11 +35,137 @@ on:
         required: false
         default: ""
         type: string
+      targets:
+        description: "Optional semicolon-separated targets. Formats: project:<name> | path:<dir> | file:<file>"
+        required: false
+        default: ""
+        type: string
 
 jobs:
-  tests_on_label:
+  resolve_targets:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-at-tests'
     runs-on: ubuntu-latest
+    outputs:
+      env_name: ${{ steps.resolve.outputs.env_name }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Resolve run parameters
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          MANUAL_ENV: ${{ github.event.inputs.env }}
+          MANUAL_PROJECT: ${{ github.event.inputs.project }}
+          MANUAL_RUN_ALL: ${{ github.event.inputs.run_all }}
+          MANUAL_TEST_PATH: ${{ github.event.inputs.test_path }}
+          MANUAL_TEST_FILE: ${{ github.event.inputs.test_file }}
+          MANUAL_TEST_GREP: ${{ github.event.inputs.test_grep }}
+          MANUAL_TARGETS: ${{ github.event.inputs.targets }}
+        run: |
+          set -euo pipefail
+
+          env_name="test"
+          project_name="smoke"
+          run_all="false"
+          test_path="tests/smoke"
+          test_file=""
+          test_grep=""
+          targets=""
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            env_name="${MANUAL_ENV:-$env_name}"
+            project_name="${MANUAL_PROJECT:-$project_name}"
+            run_all="${MANUAL_RUN_ALL:-$run_all}"
+            test_path="${MANUAL_TEST_PATH:-$test_path}"
+            test_file="${MANUAL_TEST_FILE:-$test_file}"
+            test_grep="${MANUAL_TEST_GREP:-$test_grep}"
+            targets="${MANUAL_TARGETS:-$targets}"
+          else
+            body="${ISSUE_BODY:-}"
+            if [ -n "$body" ]; then
+              env_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*ENV:[[:space:]]*(test|stage)[[:space:]]*$/\1/ip' | head -n1)"
+              project_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*PROJECT:[[:space:]]*(setup|smoke|flow|tests|all)[[:space:]]*$/\1/ip' | head -n1)"
+              run_all_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*RUN_ALL:[[:space:]]*(true|false)[[:space:]]*$/\1/ip' | head -n1)"
+              path_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_PATH:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
+              file_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_FILE:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
+              grep_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_GREP:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
+              targets_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TARGETS:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
+
+              if [ -n "${env_override:-}" ]; then env_name="$env_override"; fi
+              if [ -n "${project_override:-}" ]; then project_name="$project_override"; fi
+              if [ -n "${run_all_override:-}" ]; then run_all="${run_all_override,,}"; fi
+              if [ -n "${path_override:-}" ]; then test_path="$path_override"; fi
+              if [ -n "${file_override:-}" ]; then test_file="$file_override"; fi
+              if [ -n "${grep_override:-}" ]; then test_grep="$grep_override"; fi
+              if [ -n "${targets_override:-}" ]; then targets="$targets_override"; fi
+            fi
+          fi
+
+          if [ "$env_name" != "test" ] && [ "$env_name" != "stage" ]; then
+            echo "Invalid ENV: $env_name (allowed: test|stage)"
+            exit 1
+          fi
+
+          if [ "$project_name" != "setup" ] && [ "$project_name" != "smoke" ] && [ "$project_name" != "flow" ] && [ "$project_name" != "tests" ] && [ "$project_name" != "all" ]; then
+            echo "Invalid PROJECT: $project_name (allowed: setup|smoke|flow|tests|all)"
+            exit 1
+          fi
+
+          if [ "$run_all" != "true" ] && [ "$run_all" != "false" ]; then
+            echo "Invalid RUN_ALL: $run_all (allowed: true|false)"
+            exit 1
+          fi
+
+          matrix='[]'
+          add_target() {
+            local selector="$1"
+            local project="$2"
+            local grep="$3"
+            matrix="$(jq -c --arg selector "$selector" --arg project "$project" --arg grep "$grep" \
+              '. + [{selector:$selector, project:$project, grep:$grep}]' <<< "$matrix")"
+          }
+
+          if [ "$run_all" = "true" ] || [ "$project_name" = "all" ]; then
+            add_target "" "" "$test_grep"
+          elif [ -n "$targets" ]; then
+            IFS=';' read -ra parts <<< "$targets"
+            for raw in "${parts[@]}"; do
+              token="$(echo "$raw" | xargs)"
+              [ -z "$token" ] && continue
+
+              if [[ "$token" == project:* ]]; then
+                add_target "" "${token#project:}" "$test_grep"
+              elif [[ "$token" == path:* ]]; then
+                add_target "${token#path:}" "$project_name" "$test_grep"
+              elif [[ "$token" == file:* ]]; then
+                add_target "${token#file:}" "$project_name" "$test_grep"
+              else
+                add_target "$token" "$project_name" "$test_grep"
+              fi
+            done
+          else
+            selector="$test_path"
+            if [ -n "$test_file" ]; then
+              selector="$test_file"
+            fi
+            add_target "$selector" "$project_name" "$test_grep"
+          fi
+
+          {
+            echo "env_name=$env_name"
+            echo "matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+
+  tests_on_label:
+    needs: resolve_targets
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.resolve_targets.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    env:
+      ENV: ${{ needs.resolve_targets.outputs.env_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -59,109 +185,23 @@ jobs:
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps
 
-      - name: Resolve run parameters
-        id: resolve
+      - name: Run Playwright target
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          MANUAL_ENV: ${{ github.event.inputs.env }}
-          MANUAL_PROJECT: ${{ github.event.inputs.project }}
-          MANUAL_RUN_ALL: ${{ github.event.inputs.run_all }}
-          MANUAL_TEST_PATH: ${{ github.event.inputs.test_path }}
-          MANUAL_TEST_FILE: ${{ github.event.inputs.test_file }}
-          MANUAL_TEST_GREP: ${{ github.event.inputs.test_grep }}
-        run: |
-          set -euo pipefail
-
-          env_name="test"
-          project_name="smoke"
-          run_all="false"
-          test_path="tests/smoke"
-          test_file=""
-          test_grep=""
-
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            env_name="${MANUAL_ENV:-$env_name}"
-            project_name="${MANUAL_PROJECT:-$project_name}"
-            run_all="${MANUAL_RUN_ALL:-$run_all}"
-            test_path="${MANUAL_TEST_PATH:-$test_path}"
-            test_file="${MANUAL_TEST_FILE:-$test_file}"
-            test_grep="${MANUAL_TEST_GREP:-$test_grep}"
-          else
-            body="${ISSUE_BODY:-}"
-            if [ -n "$body" ]; then
-              env_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*ENV:[[:space:]]*(test|stage)[[:space:]]*$/\1/ip' | head -n1)"
-              project_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*PROJECT:[[:space:]]*(setup|smoke|flow|tests|all)[[:space:]]*$/\1/ip' | head -n1)"
-              run_all_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*RUN_ALL:[[:space:]]*(true|false)[[:space:]]*$/\1/ip' | head -n1)"
-              path_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_PATH:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
-              file_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_FILE:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
-              grep_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_GREP:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
-
-              if [ -n "${env_override:-}" ]; then env_name="$env_override"; fi
-              if [ -n "${project_override:-}" ]; then project_name="$project_override"; fi
-              if [ -n "${run_all_override:-}" ]; then run_all="${run_all_override,,}"; fi
-              if [ -n "${path_override:-}" ]; then test_path="$path_override"; fi
-              if [ -n "${file_override:-}" ]; then test_file="$file_override"; fi
-              if [ -n "${grep_override:-}" ]; then test_grep="$grep_override"; fi
-            fi
-          fi
-
-          if [ "$env_name" != "test" ] && [ "$env_name" != "stage" ]; then
-            echo "Invalid ENV: $env_name (allowed: test|stage)"
-            exit 1
-          fi
-
-          if [ "$project_name" != "setup" ] && [ "$project_name" != "smoke" ] && [ "$project_name" != "flow" ] && [ "$project_name" != "tests" ] && [ "$project_name" != "all" ]; then
-            echo "Invalid PROJECT: $project_name (allowed: setup|smoke|flow|tests|all)"
-            exit 1
-          fi
-
-          if [ "$run_all" != "true" ] && [ "$run_all" != "false" ]; then
-            echo "Invalid RUN_ALL: $run_all (allowed: true|false)"
-            exit 1
-          fi
-
-          {
-            echo "env_name=$env_name"
-            echo "project_name=$project_name"
-            echo "run_all=$run_all"
-            echo "test_path=$test_path"
-            echo "test_file=$test_file"
-            echo "test_grep=$test_grep"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Run Playwright tests (dynamic)
-        shell: bash
-        env:
-          ENV: ${{ steps.resolve.outputs.env_name }}
-          PROJECT_NAME: ${{ steps.resolve.outputs.project_name }}
-          RUN_ALL: ${{ steps.resolve.outputs.run_all }}
-          TEST_PATH: ${{ steps.resolve.outputs.test_path }}
-          TEST_FILE: ${{ steps.resolve.outputs.test_file }}
-          TEST_GREP: ${{ steps.resolve.outputs.test_grep }}
+          TARGET_SELECTOR: ${{ matrix.target.selector }}
+          TARGET_PROJECT: ${{ matrix.target.project }}
+          TARGET_GREP: ${{ matrix.target.grep }}
         run: |
           set -euo pipefail
           cmd="npx playwright test"
-
-          # Precedence:
-          # 1) RUN_ALL=true -> run everything
-          # 2) PROJECT=all -> run everything
-          # 3) TEST_FILE if set, otherwise TEST_PATH
-          if [ "$RUN_ALL" != "true" ] && [ "$PROJECT_NAME" != "all" ]; then
-            if [ -n "${TEST_FILE:-}" ]; then
-              cmd="$cmd $TEST_FILE"
-            elif [ -n "${TEST_PATH:-}" ]; then
-              cmd="$cmd $TEST_PATH"
-            fi
-
-            if [ -n "$PROJECT_NAME" ]; then
-              cmd="$cmd --project $PROJECT_NAME"
-            fi
+          if [ -n "${TARGET_SELECTOR:-}" ]; then
+            cmd="$cmd $TARGET_SELECTOR"
           fi
-
-          if [ -n "${TEST_GREP:-}" ]; then
-            cmd="$cmd --grep \"$TEST_GREP\""
+          if [ -n "${TARGET_PROJECT:-}" ]; then
+            cmd="$cmd --project $TARGET_PROJECT"
+          fi
+          if [ -n "${TARGET_GREP:-}" ]; then
+            cmd="$cmd --grep \"$TARGET_GREP\""
           fi
 
           echo "ENV=$ENV"
@@ -172,6 +212,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: playwright-report-${{ github.run_id }}
+          name: playwright-report-${{ github.run_id }}-${{ strategy.job-index }}
           path: playwright-report/
           retention-days: 30
