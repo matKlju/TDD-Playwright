@@ -36,7 +36,7 @@ on:
         default: ""
         type: string
       targets:
-        description: "Optional semicolon-separated targets. Formats: project:<name> | path:<dir> | file:<file>"
+        description: "Optional semicolon-separated targets. Formats: project:<name> | path:<dir>@<project> | file:<file>@<project>"
         required: false
         default: ""
         type: string
@@ -126,6 +126,19 @@ jobs:
               '. + [{selector:$selector, project:$project, grep:$grep}]' <<< "$matrix")"
           }
 
+          normalize_selector() {
+            local raw="$1"
+            local value="$raw"
+            # Convert markdown link token [text](url) -> text
+            if [[ "$value" =~ ^\[([^\]]+)\]\([^)]+\)$ ]]; then
+              value="${BASH_REMATCH[1]}"
+            fi
+            # remove optional surrounding backticks
+            value="${value#\`}"
+            value="${value%\`}"
+            printf '%s' "$value"
+          }
+
           if [ "$run_all" = "true" ] || [ "$project_name" = "all" ]; then
             add_target "" "" "$test_grep"
           elif [ -n "$targets" ]; then
@@ -134,14 +147,28 @@ jobs:
               token="$(echo "$raw" | xargs)"
               [ -z "$token" ] && continue
 
-              if [[ "$token" == project:* ]]; then
-                add_target "" "${token#project:}" "$test_grep"
-              elif [[ "$token" == path:* ]]; then
-                add_target "${token#path:}" "$project_name" "$test_grep"
-              elif [[ "$token" == file:* ]]; then
-                add_target "${token#file:}" "$project_name" "$test_grep"
+              token_project="$project_name"
+              token_selector="$token"
+
+              # Optional per-target project override with @project suffix.
+              if [[ "$token_selector" == *@* ]]; then
+                suffix="${token_selector##*@}"
+                if [[ "$suffix" == "setup" || "$suffix" == "smoke" || "$suffix" == "flow" || "$suffix" == "tests" ]]; then
+                  token_project="$suffix"
+                  token_selector="${token_selector%@*}"
+                fi
+              fi
+
+              token_selector="$(normalize_selector "$token_selector")"
+
+              if [[ "$token_selector" == project:* ]]; then
+                add_target "" "${token_selector#project:}" "$test_grep"
+              elif [[ "$token_selector" == path:* ]]; then
+                add_target "$(normalize_selector "${token_selector#path:}")" "$token_project" "$test_grep"
+              elif [[ "$token_selector" == file:* ]]; then
+                add_target "$(normalize_selector "${token_selector#file:}")" "$token_project" "$test_grep"
               else
-                add_target "$token" "$project_name" "$test_grep"
+                add_target "$token_selector" "$token_project" "$test_grep"
               fi
             done
           else
@@ -149,6 +176,7 @@ jobs:
             if [ -n "$test_file" ]; then
               selector="$test_file"
             fi
+            selector="$(normalize_selector "$selector")"
             add_target "$selector" "$project_name" "$test_grep"
           fi
 
