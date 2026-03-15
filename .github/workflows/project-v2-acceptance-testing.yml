@@ -285,7 +285,7 @@ jobs:
             --arg success_name "$SUCCESS_STATUS" \
             --arg fail_name "$FAIL_STATUS" \
             '{
-              query: "query($org:String!, $number:Int!) { organization(login:$org) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }",
+              query: "query($org:String!, $number:Int!) { organization(login:$org) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } user(login:$org) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }",
               variables: { org:$org, number:$number }
             }')
 
@@ -295,10 +295,10 @@ jobs:
             -d "$query_project" \
             https://api.github.com/graphql)
 
-          project_id=$(echo "$project_resp" | jq -r '.data.organization.projectV2.id // empty')
-          field_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" '((.data.organization.projectV2.fields.nodes // []) | map(select(.name == $f)) | .[0].id) // empty')
-          done_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$SUCCESS_STATUS" '((((.data.organization.projectV2.fields.nodes // []) | map(select(.name == $f)) | .[0].options) // []) | map(select(.name == $s)) | .[0].id) // empty')
-          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$FAIL_STATUS" '((((.data.organization.projectV2.fields.nodes // []) | map(select(.name == $f)) | .[0].options) // []) | map(select(.name == $s)) | .[0].id) // empty')
+          project_id=$(echo "$project_resp" | jq -r '(.data.organization.projectV2.id // .data.user.projectV2.id // empty)')
+          field_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" '((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select(.name == $f)) | .[0].id) // empty)')
+          done_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$SUCCESS_STATUS" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select(.name == $f)) | .[0].options) // []) | map(select(.name == $s)) | .[0].id)) // empty)')
+          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$FAIL_STATUS" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select(.name == $f)) | .[0].options) // []) | map(select(.name == $s)) | .[0].id)) // empty)')
 
           if [ -z "$project_id" ] || [ "$project_id" = "null" ] || [ -z "$field_id" ] || [ "$field_id" = "null" ] || [ -z "$done_option_id" ] || [ "$done_option_id" = "null" ] || [ -z "$rejected_option_id" ] || [ "$rejected_option_id" = "null" ]; then
             echo "Could not resolve project/field/option ids"
