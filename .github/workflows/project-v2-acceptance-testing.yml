@@ -129,10 +129,9 @@ jobs:
           normalize_selector() {
             local raw="$1"
             local value="$raw"
-            # Convert markdown link token [text](url) -> text
-            if [[ "$value" =~ ^\[([^\]]+)\]\([^)]+\)$ ]]; then
-              value="${BASH_REMATCH[1]}"
-            fi
+            # Convert markdown link token [text](url) -> text.
+            # Use sed instead of bash regex to avoid shell parsing edge-cases.
+            value="$(printf '%s' "$value" | sed -E 's/^\[([^]]+)\]\([^)]*\)$/\1/')"
             # remove optional surrounding backticks
             value="${value#\`}"
             value="${value%\`}"
