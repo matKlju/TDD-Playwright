@@ -4,13 +4,42 @@ on:
   issues:
     types: [labeled]
   workflow_dispatch:
+    inputs:
+      env:
+        description: "test or stage"
+        required: false
+        default: "test"
+        type: string
+      project:
+        description: "setup, smoke, flow, tests, all"
+        required: false
+        default: "smoke"
+        type: string
+      run_all:
+        description: "Run all tests: true/false"
+        required: false
+        default: "false"
+        type: string
+      test_path:
+        description: "Optional folder path"
+        required: false
+        default: ""
+        type: string
+      test_file:
+        description: "Optional single test file"
+        required: false
+        default: ""
+        type: string
+      test_grep:
+        description: "Optional grep pattern for test title"
+        required: false
+        default: ""
+        type: string
 
 jobs:
-  smoke_on_label:
+  tests_on_label:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-at-tests'
     runs-on: ubuntu-latest
-    env:
-      ENV: test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,7 +47,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "24"
           cache: "npm"
 
       - name: Run Docker
@@ -30,8 +59,114 @@ jobs:
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps
 
-      - name: Run smoke tests
-        run: npx playwright test tests/smoke --project smoke
+      - name: Resolve run parameters
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          MANUAL_ENV: ${{ github.event.inputs.env }}
+          MANUAL_PROJECT: ${{ github.event.inputs.project }}
+          MANUAL_RUN_ALL: ${{ github.event.inputs.run_all }}
+          MANUAL_TEST_PATH: ${{ github.event.inputs.test_path }}
+          MANUAL_TEST_FILE: ${{ github.event.inputs.test_file }}
+          MANUAL_TEST_GREP: ${{ github.event.inputs.test_grep }}
+        run: |
+          set -euo pipefail
+
+          env_name="test"
+          project_name="smoke"
+          run_all="false"
+          test_path="tests/smoke"
+          test_file=""
+          test_grep=""
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            env_name="${MANUAL_ENV:-$env_name}"
+            project_name="${MANUAL_PROJECT:-$project_name}"
+            run_all="${MANUAL_RUN_ALL:-$run_all}"
+            test_path="${MANUAL_TEST_PATH:-$test_path}"
+            test_file="${MANUAL_TEST_FILE:-$test_file}"
+            test_grep="${MANUAL_TEST_GREP:-$test_grep}"
+          else
+            body="${ISSUE_BODY:-}"
+            if [ -n "$body" ]; then
+              env_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*ENV:[[:space:]]*(test|stage)[[:space:]]*$/\1/ip' | head -n1)"
+              project_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*PROJECT:[[:space:]]*(setup|smoke|flow|tests|all)[[:space:]]*$/\1/ip' | head -n1)"
+              run_all_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*RUN_ALL:[[:space:]]*(true|false)[[:space:]]*$/\1/ip' | head -n1)"
+              path_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_PATH:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
+              file_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_FILE:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
+              grep_override="$(printf '%s\n' "$body" | sed -nE 's/^[[:space:]]*TEST_GREP:[[:space:]]*(.+)[[:space:]]*$/\1/ip' | head -n1)"
+
+              if [ -n "${env_override:-}" ]; then env_name="$env_override"; fi
+              if [ -n "${project_override:-}" ]; then project_name="$project_override"; fi
+              if [ -n "${run_all_override:-}" ]; then run_all="${run_all_override,,}"; fi
+              if [ -n "${path_override:-}" ]; then test_path="$path_override"; fi
+              if [ -n "${file_override:-}" ]; then test_file="$file_override"; fi
+              if [ -n "${grep_override:-}" ]; then test_grep="$grep_override"; fi
+            fi
+          fi
+
+          if [ "$env_name" != "test" ] && [ "$env_name" != "stage" ]; then
+            echo "Invalid ENV: $env_name (allowed: test|stage)"
+            exit 1
+          fi
+
+          if [ "$project_name" != "setup" ] && [ "$project_name" != "smoke" ] && [ "$project_name" != "flow" ] && [ "$project_name" != "tests" ] && [ "$project_name" != "all" ]; then
+            echo "Invalid PROJECT: $project_name (allowed: setup|smoke|flow|tests|all)"
+            exit 1
+          fi
+
+          if [ "$run_all" != "true" ] && [ "$run_all" != "false" ]; then
+            echo "Invalid RUN_ALL: $run_all (allowed: true|false)"
+            exit 1
+          fi
+
+          {
+            echo "env_name=$env_name"
+            echo "project_name=$project_name"
+            echo "run_all=$run_all"
+            echo "test_path=$test_path"
+            echo "test_file=$test_file"
+            echo "test_grep=$test_grep"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Playwright tests (dynamic)
+        shell: bash
+        env:
+          ENV: ${{ steps.resolve.outputs.env_name }}
+          PROJECT_NAME: ${{ steps.resolve.outputs.project_name }}
+          RUN_ALL: ${{ steps.resolve.outputs.run_all }}
+          TEST_PATH: ${{ steps.resolve.outputs.test_path }}
+          TEST_FILE: ${{ steps.resolve.outputs.test_file }}
+          TEST_GREP: ${{ steps.resolve.outputs.test_grep }}
+        run: |
+          set -euo pipefail
+          cmd="npx playwright test"
+
+          # Precedence:
+          # 1) RUN_ALL=true -> run everything
+          # 2) PROJECT=all -> run everything
+          # 3) TEST_FILE if set, otherwise TEST_PATH
+          if [ "$RUN_ALL" != "true" ] && [ "$PROJECT_NAME" != "all" ]; then
+            if [ -n "${TEST_FILE:-}" ]; then
+              cmd="$cmd $TEST_FILE"
+            elif [ -n "${TEST_PATH:-}" ]; then
+              cmd="$cmd $TEST_PATH"
+            fi
+
+            if [ -n "$PROJECT_NAME" ]; then
+              cmd="$cmd --project $PROJECT_NAME"
+            fi
+          fi
+
+          if [ -n "${TEST_GREP:-}" ]; then
+            cmd="$cmd --grep \"$TEST_GREP\""
+          fi
+
+          echo "ENV=$ENV"
+          echo "Running: $cmd"
+          eval "$cmd"
 
       - name: Upload Playwright Report
         if: always()
