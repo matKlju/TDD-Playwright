@@ -296,9 +296,9 @@ jobs:
             https://api.github.com/graphql)
 
           project_id=$(echo "$project_resp" | jq -r '(.data.organization.projectV2.id // .data.user.projectV2.id // empty)')
-          field_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" '((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select(.name == $f)) | .[0].id) // empty)')
-          done_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$SUCCESS_STATUS" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select(.name == $f)) | .[0].options) // []) | map(select(.name == $s)) | .[0].id)) // empty)')
-          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$FAIL_STATUS" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select(.name == $f)) | .[0].options) // []) | map(select(.name == $s)) | .[0].id)) // empty)')
+          field_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" '((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].id) // empty)')
+          done_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$SUCCESS_STATUS" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].options) // []) | map(select((.name // "" | ascii_downcase) == ($s | ascii_downcase))) | .[0].id)) // empty)')
+          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$FAIL_STATUS" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].options) // []) | map(select((.name // "" | ascii_downcase) == ($s | ascii_downcase))) | .[0].id)) // empty)')
 
           if [ -z "$project_id" ] || [ "$project_id" = "null" ] || [ -z "$field_id" ] || [ "$field_id" = "null" ] || [ -z "$done_option_id" ] || [ "$done_option_id" = "null" ] || [ -z "$rejected_option_id" ] || [ "$rejected_option_id" = "null" ]; then
             echo "Could not resolve project/field/option ids"
