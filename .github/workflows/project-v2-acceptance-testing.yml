@@ -242,3 +242,156 @@ jobs:
           name: playwright-report-${{ github.run_id }}-${{ strategy.job-index }}
           path: playwright-report/
           retention-days: 30
+
+  resolve_project_item:
+    if: github.event_name == 'issues' && github.event.label.name == 'run-at-tests'
+    runs-on: ubuntu-latest
+    outputs:
+      project_id: ${{ steps.resolve.outputs.project_id }}
+      field_id: ${{ steps.resolve.outputs.field_id }}
+      done_option_id: ${{ steps.resolve.outputs.done_option_id }}
+      rejected_option_id: ${{ steps.resolve.outputs.rejected_option_id }}
+      item_id: ${{ steps.resolve.outputs.item_id }}
+    steps:
+      - name: Resolve project item and status field ids
+        id: resolve
+        shell: bash
+        env:
+          BYK_PAT: ${{ secrets.BYK_PAT }}
+          ORG: ${{ vars.ORG }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          STATUS_FIELD_NAME: ${{ vars.STATUS_FIELD_NAME }}
+          SUCCESS_STATUS: ${{ vars.SUCCESS_STATUS }}
+          FAIL_STATUS: ${{ vars.FAIL_STATUS }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BYK_PAT:-}" ]; then
+            echo "Missing secret BYK_PAT"
+            exit 1
+          fi
+
+          query_project=$(jq -n \
+            --arg org "$ORG" \
+            --argjson number "$PROJECT_NUMBER" \
+            --arg field_name "$STATUS_FIELD_NAME" \
+            --arg success_name "$SUCCESS_STATUS" \
+            --arg fail_name "$FAIL_STATUS" \
+            '{
+              query: "query($org:String!, $number:Int!) { organization(login:$org) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }",
+              variables: { org:$org, number:$number }
+            }')
+
+          project_resp=$(curl -sS -X POST \
+            -H "Authorization: bearer $BYK_PAT" \
+            -H "Content-Type: application/json" \
+            -d "$query_project" \
+            https://api.github.com/graphql)
+
+          project_id=$(echo "$project_resp" | jq -r '.data.organization.projectV2.id')
+          field_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name == $f) | .id')
+          done_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$SUCCESS_STATUS" '.data.organization.projectV2.fields.nodes[] | select(.name == $f) | .options[] | select(.name == $s) | .id')
+          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$FAIL_STATUS" '.data.organization.projectV2.fields.nodes[] | select(.name == $f) | .options[] | select(.name == $s) | .id')
+
+          if [ -z "$project_id" ] || [ "$project_id" = "null" ] || [ -z "$field_id" ] || [ "$field_id" = "null" ] || [ -z "$done_option_id" ] || [ "$done_option_id" = "null" ] || [ -z "$rejected_option_id" ] || [ "$rejected_option_id" = "null" ]; then
+            echo "Could not resolve project/field/option ids"
+            echo "$project_resp"
+            exit 1
+          fi
+
+          query_item=$(jq -n \
+            --arg owner "$REPO_OWNER" \
+            --arg repo "$REPO_NAME" \
+            --argjson issue_number "$ISSUE_NUMBER" \
+            --arg project_id "$project_id" \
+            '{
+              query: "query($owner:String!, $repo:String!, $issueNumber:Int!) { repository(owner:$owner, name:$repo) { issue(number:$issueNumber) { projectItems(first:100, includeArchived:false) { nodes { id project { id } } } } } }",
+              variables: { owner:$owner, repo:$repo, issueNumber:$issue_number }
+            }')
+
+          item_resp=$(curl -sS -X POST \
+            -H "Authorization: bearer $BYK_PAT" \
+            -H "Content-Type: application/json" \
+            -d "$query_item" \
+            https://api.github.com/graphql)
+
+          item_id=$(echo "$item_resp" | jq -r --arg pid "$project_id" '.data.repository.issue.projectItems.nodes[] | select(.project.id == $pid) | .id' | head -n1)
+
+          if [ -z "$item_id" ] || [ "$item_id" = "null" ]; then
+            echo "Issue #$ISSUE_NUMBER is not linked to project $project_id"
+            echo "$item_resp"
+            exit 1
+          fi
+
+          {
+            echo "project_id=$project_id"
+            echo "field_id=$field_id"
+            echo "done_option_id=$done_option_id"
+            echo "rejected_option_id=$rejected_option_id"
+            echo "item_id=$item_id"
+          } >> "$GITHUB_OUTPUT"
+
+  set_status_done:
+    needs: [tests_on_label, resolve_project_item]
+    if: needs.tests_on_label.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update project status to Done
+        shell: bash
+        env:
+          BYK_PAT: ${{ secrets.BYK_PAT }}
+          PROJECT_ID: ${{ needs.resolve_project_item.outputs.project_id }}
+          ITEM_ID: ${{ needs.resolve_project_item.outputs.item_id }}
+          FIELD_ID: ${{ needs.resolve_project_item.outputs.field_id }}
+          OPTION_ID: ${{ needs.resolve_project_item.outputs.done_option_id }}
+        run: |
+          set -euo pipefail
+          mutation=$(jq -n \
+            --arg project_id "$PROJECT_ID" \
+            --arg item_id "$ITEM_ID" \
+            --arg field_id "$FIELD_ID" \
+            --arg option_id "$OPTION_ID" \
+            '{
+              query: "mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) { updateProjectV2ItemFieldValue(input:{ projectId:$projectId, itemId:$itemId, fieldId:$fieldId, value:{ singleSelectOptionId:$optionId } }) { projectV2Item { id } } }",
+              variables: { projectId:$project_id, itemId:$item_id, fieldId:$field_id, optionId:$option_id }
+            }')
+
+          curl -sS -X POST \
+            -H "Authorization: bearer $BYK_PAT" \
+            -H "Content-Type: application/json" \
+            -d "$mutation" \
+            https://api.github.com/graphql
+
+  set_status_rejected:
+    needs: [tests_on_label, resolve_project_item]
+    if: needs.tests_on_label.result == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update project status to AT rejected
+        shell: bash
+        env:
+          BYK_PAT: ${{ secrets.BYK_PAT }}
+          PROJECT_ID: ${{ needs.resolve_project_item.outputs.project_id }}
+          ITEM_ID: ${{ needs.resolve_project_item.outputs.item_id }}
+          FIELD_ID: ${{ needs.resolve_project_item.outputs.field_id }}
+          OPTION_ID: ${{ needs.resolve_project_item.outputs.rejected_option_id }}
+        run: |
+          set -euo pipefail
+          mutation=$(jq -n \
+            --arg project_id "$PROJECT_ID" \
+            --arg item_id "$ITEM_ID" \
+            --arg field_id "$FIELD_ID" \
+            --arg option_id "$OPTION_ID" \
+            '{
+              query: "mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) { updateProjectV2ItemFieldValue(input:{ projectId:$projectId, itemId:$itemId, fieldId:$fieldId, value:{ singleSelectOptionId:$optionId } }) { projectV2Item { id } } }",
+              variables: { projectId:$project_id, itemId:$item_id, fieldId:$field_id, optionId:$option_id }
+            }')
+
+          curl -sS -X POST \
+            -H "Authorization: bearer $BYK_PAT" \
+            -H "Content-Type: application/json" \
+            -d "$mutation" \
+            https://api.github.com/graphql
