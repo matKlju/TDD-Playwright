@@ -269,21 +269,37 @@ jobs:
         run: |
           set -euo pipefail
 
+          trim() {
+            printf '%s' "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+          }
+
+          org="$(trim "${ORG:-}")"
+          project_number="$(trim "${PROJECT_NUMBER:-}")"
+          status_field_name="$(trim "${STATUS_FIELD_NAME:-Status}")"
+          success_status_name="$(trim "${SUCCESS_STATUS:-Done}")"
+          fail_status_name="$(trim "${FAIL_STATUS:-AT rejected}")"
+
           if [ -z "${BYK_PAT:-}" ]; then
             echo "Missing secret BYK_PAT"
             exit 1
           fi
-          if [ -z "${ORG:-}" ] || [ -z "${PROJECT_NUMBER:-}" ] || [ -z "${STATUS_FIELD_NAME:-}" ] || [ -z "${SUCCESS_STATUS:-}" ] || [ -z "${FAIL_STATUS:-}" ]; then
-            echo "Missing required repository variables: ORG, PROJECT_NUMBER, STATUS_FIELD_NAME, SUCCESS_STATUS, FAIL_STATUS"
+          if [ -z "$org" ] || [ -z "$project_number" ]; then
+            echo "Missing required repository variables: ORG, PROJECT_NUMBER"
+            exit 1
+          fi
+          if ! [[ "$project_number" =~ ^[0-9]+$ ]]; then
+            echo "PROJECT_NUMBER must be numeric, got: '$project_number'"
             exit 1
           fi
 
+          echo "Using owner='$org' project_number='$project_number' status_field='$status_field_name' success='$success_status_name' fail='$fail_status_name'"
+
           query_project=$(jq -n \
-            --arg org "$ORG" \
-            --argjson number "$PROJECT_NUMBER" \
-            --arg field_name "$STATUS_FIELD_NAME" \
-            --arg success_name "$SUCCESS_STATUS" \
-            --arg fail_name "$FAIL_STATUS" \
+            --arg org "$org" \
+            --argjson number "$project_number" \
+            --arg field_name "$status_field_name" \
+            --arg success_name "$success_status_name" \
+            --arg fail_name "$fail_status_name" \
             '{
               query: "query($org:String!, $number:Int!) { organization(login:$org) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } user(login:$org) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }",
               variables: { org:$org, number:$number }
@@ -296,13 +312,18 @@ jobs:
             https://api.github.com/graphql)
 
           project_id=$(echo "$project_resp" | jq -r '(.data.organization.projectV2.id // .data.user.projectV2.id // empty)')
-          field_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" '((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].id) // empty)')
-          done_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$SUCCESS_STATUS" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].options) // []) | map(select((.name // "" | ascii_downcase) == ($s | ascii_downcase))) | .[0].id)) // empty)')
-          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$STATUS_FIELD_NAME" --arg s "$FAIL_STATUS" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].options) // []) | map(select((.name // "" | ascii_downcase) == ($s | ascii_downcase))) | .[0].id)) // empty)')
+          field_id=$(echo "$project_resp" | jq -r --arg f "$status_field_name" '((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].id) // empty)')
+          done_option_id=$(echo "$project_resp" | jq -r --arg f "$status_field_name" --arg s "$success_status_name" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].options) // []) | map(select((.name // "" | ascii_downcase) == ($s | ascii_downcase))) | .[0].id)) // empty)')
+          rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$status_field_name" --arg s "$fail_status_name" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].options) // []) | map(select((.name // "" | ascii_downcase) == ($s | ascii_downcase))) | .[0].id)) // empty)')
 
           if [ -z "$project_id" ] || [ "$project_id" = "null" ] || [ -z "$field_id" ] || [ "$field_id" = "null" ] || [ -z "$done_option_id" ] || [ "$done_option_id" = "null" ] || [ -z "$rejected_option_id" ] || [ "$rejected_option_id" = "null" ]; then
             echo "Could not resolve project/field/option ids"
             echo "$project_resp"
+            echo "Available fields/options:"
+            echo "$project_resp" | jq -r '((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // [])
+              | map(select(.name != null))
+              | .[]
+              | (.name + ": " + (((.options // []) | map(.name) | join(", "))))'
             exit 1
           fi
 
