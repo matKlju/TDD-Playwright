@@ -53,6 +53,25 @@ jobs:
       env_name: ${{ steps.resolve.outputs.env_name }}
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
+      - name: Cleanup previous AT result labels
+        if: ${{ github.event_name == 'issues' && github.event.label.name == 'run-at-tests' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          # Remove stale labels from earlier runs; ignore not-found responses.
+          for label in tests-passed tests-failed; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER/labels/$label" || true)
+            echo "cleanup $label -> HTTP $code"
+          done
+
       - name: Resolve run parameters
         id: resolve
         shell: bash
