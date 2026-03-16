@@ -1,5 +1,9 @@
 name: Run AT Smoke Tests On Label
 
+permissions:
+  contents: read
+  issues: write
+
 on:
   issues:
     types: [labeled]
@@ -249,7 +253,6 @@ jobs:
     outputs:
       project_id: ${{ steps.resolve.outputs.project_id }}
       field_id: ${{ steps.resolve.outputs.field_id }}
-      done_option_id: ${{ steps.resolve.outputs.done_option_id }}
       rejected_option_id: ${{ steps.resolve.outputs.rejected_option_id }}
       item_id: ${{ steps.resolve.outputs.item_id }}
     steps:
@@ -261,7 +264,6 @@ jobs:
           ORG: ${{ vars.ORG }}
           PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
           STATUS_FIELD_NAME: ${{ vars.STATUS_FIELD_NAME }}
-          SUCCESS_STATUS: ${{ vars.SUCCESS_STATUS }}
           FAIL_STATUS: ${{ vars.FAIL_STATUS }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -276,8 +278,7 @@ jobs:
           org="$(trim "${ORG:-}")"
           project_number="$(trim "${PROJECT_NUMBER:-}")"
           status_field_name="$(trim "${STATUS_FIELD_NAME:-Status}")"
-          success_status_name="$(trim "${SUCCESS_STATUS:-Done}")"
-          fail_status_name="$(trim "${FAIL_STATUS:-AT rejected}")"
+          fail_status_name="$(trim "${FAIL_STATUS:-AT-rejected}")"
 
           if [ -z "${BYK_PAT:-}" ]; then
             echo "Missing secret BYK_PAT"
@@ -292,13 +293,12 @@ jobs:
             exit 1
           fi
 
-          echo "Using owner='$org' project_number='$project_number' status_field='$status_field_name' success='$success_status_name' fail='$fail_status_name'"
+          echo "Using owner='$org' project_number='$project_number' status_field='$status_field_name' fail='$fail_status_name'"
 
           query_project=$(jq -n \
             --arg org "$org" \
             --argjson number "$project_number" \
             --arg field_name "$status_field_name" \
-            --arg success_name "$success_status_name" \
             --arg fail_name "$fail_status_name" \
             '{
               query: "query($org:String!, $number:Int!) { organization(login:$org) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } user(login:$org) { projectV2(number:$number) { id fields(first:100) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } } }",
@@ -313,10 +313,9 @@ jobs:
 
           project_id=$(echo "$project_resp" | jq -r '(.data.organization.projectV2.id // .data.user.projectV2.id // empty)')
           field_id=$(echo "$project_resp" | jq -r --arg f "$status_field_name" '((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].id) // empty)')
-          done_option_id=$(echo "$project_resp" | jq -r --arg f "$status_field_name" --arg s "$success_status_name" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].options) // []) | map(select((.name // "" | ascii_downcase) == ($s | ascii_downcase))) | .[0].id)) // empty)')
           rejected_option_id=$(echo "$project_resp" | jq -r --arg f "$status_field_name" --arg s "$fail_status_name" '(((((((.data.organization.projectV2.fields.nodes // .data.user.projectV2.fields.nodes) // []) | map(select((.name // "" | ascii_downcase) == ($f | ascii_downcase))) | .[0].options) // []) | map(select((.name // "" | ascii_downcase) == ($s | ascii_downcase))) | .[0].id)) // empty)')
 
-          if [ -z "$project_id" ] || [ "$project_id" = "null" ] || [ -z "$field_id" ] || [ "$field_id" = "null" ] || [ -z "$done_option_id" ] || [ "$done_option_id" = "null" ] || [ -z "$rejected_option_id" ] || [ "$rejected_option_id" = "null" ]; then
+          if [ -z "$project_id" ] || [ "$project_id" = "null" ] || [ -z "$field_id" ] || [ "$field_id" = "null" ] || [ -z "$rejected_option_id" ] || [ "$rejected_option_id" = "null" ]; then
             echo "Could not resolve project/field/option ids"
             echo "$project_resp"
             echo "Available fields/options:"
@@ -354,41 +353,36 @@ jobs:
           {
             echo "project_id=$project_id"
             echo "field_id=$field_id"
-            echo "done_option_id=$done_option_id"
             echo "rejected_option_id=$rejected_option_id"
             echo "item_id=$item_id"
           } >> "$GITHUB_OUTPUT"
 
-  set_status_done:
-    needs: [tests_on_label, resolve_project_item]
-    if: ${{ always() && needs.tests_on_label.result == 'success' }}
+  labels_on_success:
+    needs: [tests_on_label]
+    if: ${{ always() && github.event_name == 'issues' && github.event.label.name == 'run-at-tests' && needs.tests_on_label.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Update project status to Done
+      - name: Remove run-at-tests and add tests-passed
         shell: bash
         env:
-          BYK_PAT: ${{ secrets.BYK_PAT }}
-          PROJECT_ID: ${{ needs.resolve_project_item.outputs.project_id }}
-          ITEM_ID: ${{ needs.resolve_project_item.outputs.item_id }}
-          FIELD_ID: ${{ needs.resolve_project_item.outputs.field_id }}
-          OPTION_ID: ${{ needs.resolve_project_item.outputs.done_option_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
-          mutation=$(jq -n \
-            --arg project_id "$PROJECT_ID" \
-            --arg item_id "$ITEM_ID" \
-            --arg field_id "$FIELD_ID" \
-            --arg option_id "$OPTION_ID" \
-            '{
-              query: "mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) { updateProjectV2ItemFieldValue(input:{ projectId:$projectId, itemId:$itemId, fieldId:$fieldId, value:{ singleSelectOptionId:$optionId } }) { projectV2Item { id } } }",
-              variables: { projectId:$project_id, itemId:$item_id, fieldId:$field_id, optionId:$option_id }
-            }')
+          # Remove trigger label; ignore missing-label errors.
+          curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER/labels/run-at-tests" || true
 
+          # Add pass label.
           curl -sS -X POST \
-            -H "Authorization: bearer $BYK_PAT" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
-            -d "$mutation" \
-            https://api.github.com/graphql
+            -d '{"labels":["tests-passed"]}' \
+            "https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER/labels"
 
   set_status_rejected:
     needs: [tests_on_label, resolve_project_item]
@@ -420,3 +414,28 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$mutation" \
             https://api.github.com/graphql
+
+  labels_on_failure:
+    needs: [tests_on_label]
+    if: ${{ always() && github.event_name == 'issues' && github.event.label.name == 'run-at-tests' && needs.tests_on_label.result == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove run-at-tests and add tests-failed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER/labels/run-at-tests" || true
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d '{"labels":["tests-failed"]}' \
+            "https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER/labels"
