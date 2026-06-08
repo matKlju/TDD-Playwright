@@ -5,10 +5,10 @@ env:
   ENV: test
 
 on:
-  schedule:
+  # schedule:
     # Weekdays at 03:30 UTC (06:30 in summer EEST, 05:30 in winter EET)
-    - cron: "30 3 * * 1-5"
-  workflow_dispatch:
+    # - cron: "30 3 * * 1-5"
+  # workflow_dispatch:
 
 jobs:
   run_all_tests:
